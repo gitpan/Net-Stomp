@@ -1,4 +1,10 @@
 Revision history for Perl module Net::Stomp:
 
+0.31 Wed Oct 11 17:28:31 BST 2006
+  - minor docpatch noticed by Leo Lapworth
+  - tweak frame parser
+  - add unsubscribe() method
+  - add can_read() method
+
 0.30 Sat Oct  7 09:47:57 BST 2006
   - initial release

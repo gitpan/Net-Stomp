@@ -2,10 +2,11 @@ package Net::Stomp;
 use strict;
 use warnings;
 use IO::Socket::INET;
+use IO::Select;
 use Net::Stomp::Frame;
 use base 'Class::Accessor::Fast';
-__PACKAGE__->mk_accessors(qw(hostname port socket));
-our $VERSION = '0.30';
+__PACKAGE__->mk_accessors(qw(hostname port select socket));
+our $VERSION = '0.31';
 
 sub new {
     my $class  = shift;
@@ -18,6 +19,10 @@ sub new {
     die "Error connecting to " . $self->hostname . ':' . $self->port . ": $!"
         unless $socket;
     $self->socket($socket);
+    my $select = IO::Select->new();
+    $select->add($socket);
+    $self->select($select);
+
     return $self;
 }
 
@@ -37,6 +42,12 @@ sub disconnect {
     $self->socket->close;
 }
 
+sub can_read {
+    my ( $self, $conf ) = @_;
+    my $timeout = $conf->{timeout} || 0;
+    return $self->select->can_read($timeout) || 0;
+}
+
 sub send {
     my ( $self, $conf ) = @_;
     my $body = $conf->{body};
@@ -53,6 +64,13 @@ sub subscribe {
     $self->send_frame($frame);
 }
 
+sub unsubscribe {
+    my ( $self, $conf ) = @_;
+    my $frame = Net::Stomp::Frame->new(
+        { command => 'UNSUBSCRIBE', headers => $conf } );
+    $self->send_frame($frame);
+}
+
 sub ack {
     my ( $self, $conf ) = @_;
     my $id    = $conf->{frame}->headers->{'message-id'};
@@ -64,7 +82,7 @@ sub ack {
 sub send_frame {
     my ( $self, $frame ) = @_;
 
-    #    warn $frame->as_string . "\n";
+    # warn "send [" . $frame->as_string . "]\n";
     $self->socket->print( $frame->as_string );
 }
 
@@ -77,12 +95,14 @@ sub receive_frame {
     while (1) {
         my $len = $socket->read( $string, 1, $offset );
         $offset += $len;
-        last if $string =~ /\000/;
+        last if $string =~ /\000\n$/;
     }
+
+    # warn "receive [$string]\n";
 
     my $frame = Net::Stomp::Frame->parse($string);
 
-    #    warn $frame->as_string . "\n";
+    # warn "[" . $frame->as_string . "]\n";
     return $frame;
 }
 
@@ -238,19 +258,34 @@ subscribe.
       }
   );
 
+=head2 unsubscribe
+
+This unsubscribes you to a queue or topic. You must pass in a destination:
+
+  $stomp->unsubcribe({ destination => '/queue/foo' });
+
 =head2 receive_frame
 
 This blocks and returns you the next Stomp frame. 
 
-    my $frame = $stomp->receive_frame;
-    warn $frame->body; # do something here
+  my $frame = $stomp->receive_frame;
+  warn $frame->body; # do something here
+
+=head2 can_read
+
+This returns whether a frame is waiting to be read. Optionally takes a
+timeout in seconds:
+
+  my $can_read = $stomp->can_read;
+  my $can_read = $stomp->can_read({ timeout => '0.1' });
+
 
 =head2 ack
 
 This acknowledges that you have received and processed a frame (if you
 are using client acknowledgements):
 
-    $stomp->ack( { frame => $frame } );
+  $stomp->ack( { frame => $frame } );
 
 =head2 send_frame
 
@@ -258,13 +293,13 @@ If this module does not provide enough help for sending frames, you
 may construct your own frame and send it:
 
   # write your own frame
-   my $frame = Net::Stomp::Frame->new(
+  my $frame = Net::Stomp::Frame->new(
        { command => $command, headers => $conf, body => $body } );
   $self->send_frame($frame);
 
 =head1 SEE ALSO
 
-L<Net::Stomp>.
+L<Net::Stomp::Frame>.
 
 =head1 AUTHOR
 

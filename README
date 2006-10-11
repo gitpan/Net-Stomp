@@ -140,29 +140,42 @@ METHODS
           }
       );
 
+  unsubscribe
+    This unsubscribes you to a queue or topic. You must pass in a
+    destination:
+
+      $stomp->unsubcribe({ destination => '/queue/foo' });
+
   receive_frame
     This blocks and returns you the next Stomp frame.
 
-        my $frame = $stomp->receive_frame;
-        warn $frame->body; # do something here
+      my $frame = $stomp->receive_frame;
+      warn $frame->body; # do something here
+
+  can_read
+    This returns whether a frame is waiting to be read. Optionally takes a
+    timeout in seconds:
+
+      my $can_read = $stomp->can_read;
+      my $can_read = $stomp->can_read({ timeout => '0.1' });
 
   ack
     This acknowledges that you have received and processed a frame (if you
     are using client acknowledgements):
 
-        $stomp->ack( { frame => $frame } );
+      $stomp->ack( { frame => $frame } );
 
   send_frame
     If this module does not provide enough help for sending frames, you may
     construct your own frame and send it:
 
       # write your own frame
-       my $frame = Net::Stomp::Frame->new(
+      my $frame = Net::Stomp::Frame->new(
            { command => $command, headers => $conf, body => $body } );
       $self->send_frame($frame);
 
 SEE ALSO
-    Net::Stomp.
+    Net::Stomp::Frame.
 
 AUTHOR
     Leon Brocard <acme@astray.com>.

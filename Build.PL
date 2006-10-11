@@ -9,6 +9,7 @@ my $build = Module::Build->new(
     module_name        => 'Net::Stomp',
     requires           => {
         'IO::Socket::INET'      => '0',
+        'IO::Select'            => '0',
         'Class::Accessor::Fast' => '0',
     },
 );

@@ -6,6 +6,7 @@ WriteMakefile
           'VERSION_FROM' => 'lib/Net/Stomp.pm',
           'PREREQ_PM' => {
                            'Class::Accessor::Fast' => '0',
+                           'IO::Select' => '0',
                            'IO::Socket::INET' => '0'
                          },
           'INSTALLDIRS' => 'site',
