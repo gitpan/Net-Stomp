@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name: Net-Stomp
-version: 0.31
+version: 0.32
 author:
   - Leon Brocard <acme@astray.com>.
 abstract: A Streaming Text Orientated Messaging Protocol Client

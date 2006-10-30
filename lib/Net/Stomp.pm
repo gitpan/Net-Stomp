@@ -6,7 +6,7 @@ use IO::Select;
 use Net::Stomp::Frame;
 use base 'Class::Accessor::Fast';
 __PACKAGE__->mk_accessors(qw(hostname port select socket));
-our $VERSION = '0.31';
+our $VERSION = '0.32';
 
 sub new {
     my $class  = shift;
@@ -18,6 +18,7 @@ sub new {
     );
     die "Error connecting to " . $self->hostname . ':' . $self->port . ": $!"
         unless $socket;
+    binmode($socket);
     $self->socket($socket);
     my $select = IO::Select->new();
     $select->add($socket);
@@ -82,27 +83,16 @@ sub ack {
 sub send_frame {
     my ( $self, $frame ) = @_;
 
-    # warn "send [" . $frame->as_string . "]\n";
+    #     warn "send [" . $frame->as_string . "]\n";
     $self->socket->print( $frame->as_string );
 }
 
 sub receive_frame {
-    my $self   = shift;
-    my $socket = $self->socket;
+    my $self = shift;
 
-    my $string = "";
-    my $offset = 0;
-    while (1) {
-        my $len = $socket->read( $string, 1, $offset );
-        $offset += $len;
-        last if $string =~ /\000\n$/;
-    }
+    my $frame = Net::Stomp::Frame->parse( $self->socket );
 
-    # warn "receive [$string]\n";
-
-    my $frame = Net::Stomp::Frame->parse($string);
-
-    # warn "[" . $frame->as_string . "]\n";
+    #     warn "receive [" . $frame->as_string . "]\n";
     return $frame;
 }
 
@@ -192,10 +182,12 @@ durable subscriber.
 
 =head2 send
 
-This sends a message to a queue or topic. You must pass in a destination and a body:
+This sends a message to a queue or topic. You must pass in a destination and a body.
 
   $stomp->send(
       { destination => '/queue/foo', body => 'test message' } );
+
+To send a BytesMessage, you should set the field 'bytes_message' to 1.
 
 =head2 disconnect
 
@@ -270,6 +262,8 @@ This blocks and returns you the next Stomp frame.
 
   my $frame = $stomp->receive_frame;
   warn $frame->body; # do something here
+
+The header bytes_message is 1 if the message was a BytesMessage.
 
 =head2 can_read
 

@@ -5,36 +5,65 @@ use base 'Class::Accessor::Fast';
 __PACKAGE__->mk_accessors(qw(command headers body));
 
 sub as_string {
-    my $self  = shift;
-    my $frame = $self->command . "\n";
-    while ( my ( $key, $value ) = each %{ $self->headers || {} } ) {
-        $frame .= $key . ': ' . $value . "\n";
+    my $self    = shift;
+    my $command = $self->command;
+    my $headers = $self->headers;
+    my $body    = $self->body;
+    my $frame   = $command . "\n";
+
+    # insert a content-length header
+    my $bytes_message = 0;
+    if ( $headers->{bytes_message} ) {
+        $bytes_message = 1;
+        delete $headers->{bytes_message};
+        $headers->{"content-length"} = length( $self->body );
+    }
+
+    while ( my ( $key, $value ) = each %{ $headers || {} } ) {
+        $frame .= $key . ':' . $value . "\n";
     }
     $frame .= "\n";
-    $frame .= $self->body || '';
+    $frame .= $body || '';
     $frame .= "\000";
 }
 
 sub parse {
-    my ( $package, $string ) = @_;
+    my ( $package, $socket ) = @_;
+    local $/ = "\n";
 
-    my $index = index $string, "\n";
-    my $command = substr( $string, 0, $index, '' );
-    substr( $string, 0, 1, '' );
-
-    my $headers;
-
+    # read the command
+    my $command;
     while (1) {
-        $index = index $string, "\n";
-        last if $index == 0;
-        my $header = substr( $string, 0, $index, '' );
-        substr( $string, 0, 1, '' );
-        my ( $key, $value ) = split /: ?/, $header, 2;
+        $command = $socket->getline || die "Error reading command: $!";
+        chop $command;
+        last if $command;
+    }
+
+    # read headers
+    my $headers;
+    while (1) {
+        my $line = $socket->getline || die "Error reading header: $!";
+        chop $line;
+        last if $line eq "";
+        my ( $key, $value ) = split /: ?/, $line, 2;
         $headers->{$key} = $value;
     }
-    substr( $string, 0,  1, '' );    # \n
-    substr( $string, -1, 1, '' );    # \000
-    my $body = $string;
+
+    # read the body
+    my $body;
+    if ( $headers->{"content-length"} ) {
+        $socket->read( $body, $headers->{"content-length"} )
+            || die "Error reading body: $!";
+        $socket->getc;    # eat the trailing null
+        $headers->{bytes_message} = 1;
+    } else {
+        while (1) {
+            my $byte = $socket->getc;
+            die "Error reading body: $!" unless defined $byte;
+            last if $byte eq "\000";
+            $body .= $byte;
+        }
+    }
 
     my $frame = Net::Stomp::Frame->new(
         { command => $command, headers => $headers, body => $body } );

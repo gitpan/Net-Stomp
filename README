@@ -75,10 +75,12 @@ METHODS
 
   send
     This sends a message to a queue or topic. You must pass in a destination
-    and a body:
+    and a body.
 
       $stomp->send(
           { destination => '/queue/foo', body => 'test message' } );
+
+    To send a BytesMessage, you should set the field 'bytes_message' to 1.
 
   disconnect
     This disconnects from the Stomp server:
@@ -151,6 +153,8 @@ METHODS
 
       my $frame = $stomp->receive_frame;
       warn $frame->body; # do something here
+
+    The header bytes_message is 1 if the message was a BytesMessage.
 
   can_read
     This returns whether a frame is waiting to be read. Optionally takes a

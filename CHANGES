@@ -1,5 +1,12 @@
 Revision history for Perl module Net::Stomp:
 
+0.32 Sun Oct 29 09:06:31 GMT 2006
+  - rewrote the parser to add support for BytesMessage, which should
+    allow Java<->Perl messages (thanks to Hiram Chirino and Sileshi
+    Kassa)
+  - set binmode() on the socket so Windows should now work (thanks
+    to Sileshi Kassa)
+
 0.31 Wed Oct 11 17:28:31 BST 2006
   - minor docpatch noticed by Leo Lapworth
   - tweak frame parser
