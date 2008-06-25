@@ -22,52 +22,45 @@ sub as_string {
     while ( my ( $key, $value ) = each %{ $headers || {} } ) {
         $frame .= $key . ':' . $value . "\n";
     }
-    $frame .= "\n";
-    $frame .= $body || '';
-    $frame .= "\000";
+
+    $body ||= '';
+    return "$frame\n$body\000";
 }
 
 sub parse {
-    my ( $package, $socket ) = @_;
-    local $/ = "\n";
+    my ( $class, $string ) = @_;
+    my ( $command, $headers, $body );
 
-    # read the command
-    my $command;
+    my @failure = ( $string, undef );
+
+    ( $command, $string ) = split( "\n", $string, 2 );
+    return @failure unless $command;
+
     while (1) {
-        $command = $socket->getline || die "Error reading command: $!";
-        chop $command;
-        last if $command;
+        my ( $header, $key, $val );
+        ( $header, $string ) = split( "\n", $string, 2 );
+        last unless $header;
+        ( $key, $val ) = split( /: */, $header, 2 );
+        $headers->{$key} = $val;
     }
 
-    # read headers
-    my $headers;
-    while (1) {
-        my $line = $socket->getline || die "Error reading header: $!";
-        chop $line;
-        last if $line eq "";
-        my ( $key, $value ) = split /: ?/, $line, 2;
-        $headers->{$key} = $value;
-    }
-
-    # read the body
-    my $body;
-    if ( $headers->{"content-length"} ) {
-        $socket->read( $body, $headers->{"content-length"} )
-            || die "Error reading body: $!";
-        $socket->getc;    # eat the trailing null
+    if ( my $length = $headers->{'content-length'} ) {
+        return @failure unless length($string) >= $length;
         $headers->{bytes_message} = 1;
+        $body = substr( $string, 0, $length );
+        $string = substr( $string, $length + 1 );    # +1 to eat trailing null
     } else {
-        while (1) {
-            my $byte = $socket->getc;
-            die "Error reading body: $!" unless defined $byte;
-            last if $byte eq "\000";
-            $body .= $byte;
-        }
+        return @failure unless $string =~ "\000";
+        ( $body, $string ) = split( "\000", $string, 2 );
     }
 
     my $frame = Net::Stomp::Frame->new(
-        { command => $command, headers => $headers, body => $body } );
-    return $frame;
+        {   command => $command,
+            headers => $headers,
+            body    => $body,
+        }
+    );
+    return ( $string, $frame );
 }
 
 1;
@@ -117,13 +110,22 @@ Create a new L<Net::Stomp::Frame> object:
 
 =head2 parse
 
-Create a new L<Net::Somp::Frame> given a string containing the serialised frame:
+Create a new L<Net::Stomp::Frame> given a string containing the serialised 
+frame:
 
   my $frame  = Net::Stomp::Frame->parse($string);
 
+If called in scalar context as above, the frame is returned (or undef if the
+frame couldn't be parsed).  
+
+In list context, the remainder of the string left over from parsing and the 
+frame are returned (or in failure mode, the original string and undef).
+
+  my ($remaining, $frame) = Net::Stomp::Frame->parse($string);
+
 =head2 as_string
 
-Create a string containing the serialised frame representing the frame:
+Create a string representing the serialized frame:
 
   my $string = $frame->as_string;
 
