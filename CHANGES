@@ -1,5 +1,9 @@
 Revision history for Perl module Net::Stomp:
 
+0.34 Fri Jun 27 09:29:13 BST 2008
+  - revert to 0.32's code, as the last release broke things that
+    I don't have time to fix right now 
+
 0.33 Wed Jun 25 08:45:59 BST 2008
   - fixes from Paul Driver: can_read doesn't behave correctly. The 
     docs say it returns true iff there's a frame waiting to be 

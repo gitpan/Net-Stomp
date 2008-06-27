@@ -5,14 +5,8 @@ use IO::Socket::INET;
 use IO::Select;
 use Net::Stomp::Frame;
 use base 'Class::Accessor::Fast';
-__PACKAGE__->mk_accessors(
-    qw(
-        hostname  port
-        fdset     socket
-        frames    buffer
-        )
-);
-our $VERSION = '0.33';
+__PACKAGE__->mk_accessors(qw(hostname port select socket));
+our $VERSION = '0.34';
 
 sub new {
     my $class  = shift;
@@ -25,11 +19,10 @@ sub new {
     die "Error connecting to " . $self->hostname . ':' . $self->port . ": $!"
         unless $socket;
     binmode($socket);
-
     $self->socket($socket);
-    $self->fdset( IO::Select->new($socket) );
-    $self->frames( [] );
-    $self->buffer('');
+    my $select = IO::Select->new();
+    $select->add($socket);
+    $self->select($select);
 
     return $self;
 }
@@ -50,45 +43,10 @@ sub disconnect {
     $self->socket->close;
 }
 
-sub _parse_frames {
-    my $self = shift;
-    my $buf;
-    while ( $self->fdset->can_read(0) ) {
-        unless ( $self->socket->sysread( $buf, 1024 ) ) {
-            $self->socket->close();
-            die "End of file";
-        }
-        $self->buffer( $self->buffer . $buf );
-    }
-    while (1) {
-        my ( $leftovers, $frame ) = Net::Stomp::Frame->parse( $self->buffer );
-        last unless $frame;
-        push( @{ $self->frames }, $frame );
-        $self->buffer($leftovers);
-    }
-}
-
 sub can_read {
     my ( $self, $conf ) = @_;
-    my $timeout = $conf->{timeout};
-    my $block   = $conf->{block};
-
-    $self->_parse_frames();
-    return @{ $self->frames } > 0 unless ( $timeout || $block );
-
-    while ( $block || $timeout > 0 ) {
-        return 1 if @{ $self->frames } > 0;
-        if ($block) {
-            $self->fdset->can_read;
-        } else {
-            my $start = time;
-            $self->fdset->can_read($timeout);
-            $timeout -= time - $start;
-        }
-        $self->_parse_frames();
-    }
-
-    return 0;
+    my $timeout = $conf->{timeout} || 0;
+    return $self->select->can_read($timeout) || 0;
 }
 
 sub send {
@@ -125,17 +83,16 @@ sub ack {
 sub send_frame {
     my ( $self, $frame ) = @_;
 
-    #         warn "send [" . $frame->as_string . "]\n";
+    #     warn "send [" . $frame->as_string . "]\n";
     $self->socket->print( $frame->as_string );
 }
 
 sub receive_frame {
     my $self = shift;
 
-    $self->can_read( { block => 1 } );
-    my $frame = pop( @{ $self->frames } );
+    my $frame = Net::Stomp::Frame->parse( $self->socket );
 
-    #         warn "recv [" . $frame->as_string . "]\n";
+    #     warn "receive [" . $frame->as_string . "]\n";
     return $frame;
 }
 
@@ -311,11 +268,11 @@ The header bytes_message is 1 if the message was a BytesMessage.
 =head2 can_read
 
 This returns whether a frame is waiting to be read. Optionally takes a
-timeout in seconds OR a directive to block until a frame is ready to read:
+timeout in seconds:
 
   my $can_read = $stomp->can_read;
   my $can_read = $stomp->can_read({ timeout => '0.1' });
-  $stomp->can_read({ block => 1 });
+
 
 =head2 ack
 
