@@ -1,0 +1,8 @@
+Revision history for Net-STOMP
+
+0.6	Mon Feb  8 2010
+	Improved URI handling.
+	First version uploaded to CPAN.
+
+0.5     Tue Jan 26 2010
+        First version to be packaged.
