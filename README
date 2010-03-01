@@ -1,3 +1,8 @@
+
+     WARNING: This module has been renamed to Net::STOMP::Client.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 Net-STOMP
 
 This module provides an object oriented client interface to interact

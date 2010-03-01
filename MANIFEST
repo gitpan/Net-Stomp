@@ -1,5 +1,4 @@
 Changes
-ignore.txt
 lib/Net/STOMP.pm
 lib/Net/STOMP/Debug.pm
 lib/Net/STOMP/Error.pm

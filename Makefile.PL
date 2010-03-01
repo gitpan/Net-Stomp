@@ -5,7 +5,7 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
     NAME                => 'Net::STOMP',
     AUTHOR              => q{Lionel Cons <lionel.cons@cern.ch>},
-    VERSION             => '0.6',
+    VERSION             => '0.7',
     ABSTRACT_FROM       => 'lib/Net/STOMP.pm',
     ($ExtUtils::MakeMaker::VERSION >= 6.3002
       ? ('LICENSE'=> 'perl')
