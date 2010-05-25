@@ -1,0 +1,545 @@
+package Net::Stomp;
+use strict;
+use warnings;
+use IO::Socket::INET;
+use IO::Select;
+use Net::Stomp::Frame;
+use Carp;
+use base 'Class::Accessor::Fast';
+our $VERSION = '0.35';
+__PACKAGE__->mk_accessors( qw(
+    _cur_host failover hostname hosts port select serial session_id socket ssl
+    ssl_options subscriptions _connect_headers
+) );
+
+sub new {
+    my $class = shift;
+    my $self  = $class->SUPER::new(@_);
+
+    # We are not subscribed to anything at the start
+    $self->subscriptions( {} );
+
+    $self->select( IO::Select->new );
+    my @hosts = ();
+
+    # failover://tcp://primary:61616
+    # failover:(tcp://primary:61616,tcp://secondary:61616)?randomize=false
+
+    if ($self->failover) {
+        my ($uris, $opts) = $self->failover =~ m{^failover:(?://)? \(? (.*?) \)? (?: \? (.*?) ) ?$}ix;
+
+        confess "Unable to parse failover uri: " . $self->failover
+                unless $uris;
+
+        foreach my $host (split(/,/,$uris)) {
+            my ($hostname, $port) = ($host =~ m{^\w+://([a-zA-Z0-9\-./]+):([0-9]+)$})
+              || confess "Unable to parse failover component: '$host'";
+            push(@hosts, {hostname => $hostname, port => $port});
+        }
+    }
+    $self->hosts(@hosts);
+
+    eval { $self->_get_connection};
+    while($@) {
+        sleep(5);
+        eval { $self->_get_connection};
+    }
+    return $self;
+}
+
+sub _get_connection {
+    my $self = shift;
+    if (my $hosts = $self->hosts) {
+        if (defined $self->_cur_host && ($self->_cur_host < $#{$hosts} ) ) {
+            $self->_cur_host($self->_cur_host+1);
+        } else {
+            $self->_cur_host(0);
+        }
+        $self->hostname($hosts->[$self->_cur_host]->{hostname});
+        $self->port($hosts->[$self->_cur_host]->{port});
+    }
+    my ($socket);
+    my %sockopts = (
+        PeerAddr => $self->hostname,
+        PeerPort => $self->port,
+        Proto    => 'tcp',
+        Timeout  => 5
+    );
+    if ( $self->ssl ) {
+        eval { require IO::Socket::SSL };
+        die
+            "You should install the IO::Socket::SSL module for SSL support in Net::Stomp"
+            if $@;
+        %sockopts = ( %sockopts, %{ $self->ssl_options || {} } );
+        $socket = IO::Socket::SSL->new(%sockopts);
+    } else {
+        $socket = IO::Socket::INET->new(%sockopts);
+        binmode($socket);
+    }
+    die "Error connecting to " . $self->hostname . ':' . $self->port . ": $!"
+        unless $socket;
+
+    $self->select->remove($self->socket) if $self->socket;
+
+    $self->select->add($socket);
+    $self->socket($socket);
+
+}
+
+sub connect {
+    my ( $self, $conf ) = @_;
+
+    my $frame = Net::Stomp::Frame->new(
+        { command => 'CONNECT', headers => $conf } );
+    $self->send_frame($frame);
+    $frame = $self->receive_frame;
+
+    # Setting initial values for session id, as given from
+    # the stomp server
+    $self->session_id( $frame->headers->{session} );
+    $self->_connect_headers( $conf );
+
+    return $frame;
+}
+
+sub disconnect {
+    my $self = shift;
+    my $frame = Net::Stomp::Frame->new( { command => 'DISCONNECT' } );
+    $self->send_frame($frame);
+    $self->socket->close;
+    $self->select->remove($self->socket);
+}
+
+sub _reconnect {
+    my $self = shift;
+    if ($self->socket) {
+        $self->socket->close;
+    }
+    eval { $self->_get_connection };
+    while ($@) { 
+        sleep(5);
+        eval { $self->_get_connection };
+    }
+    $self->connect( $self->_connect_headers );
+    for my $sub(keys %{$self->subscriptions}) {
+        $self->subscribe($self->subscriptions->{$sub});
+    }
+}
+
+sub can_read {
+    my ( $self, $conf ) = @_;
+    $conf ||= {};
+    my $timeout = exists $conf->{timeout} ? $conf->{timeout} : 0;
+    return $self->select->can_read($timeout) || 0;
+}
+
+sub send {
+    my ( $self, $conf ) = @_;
+    my $body = $conf->{body};
+    delete $conf->{body};
+    my $frame = Net::Stomp::Frame->new(
+        { command => 'SEND', headers => $conf, body => $body } );
+    $self->send_frame($frame);
+}
+
+sub send_transactional {
+    my ( $self, $conf ) = @_;
+    my $body = $conf->{body};
+    delete $conf->{body};
+
+    # begin the transaction
+    my $transaction_id = $self->_get_next_transaction;
+    my $begin_frame
+        = Net::Stomp::Frame->new(
+        { command => 'BEGIN', headers => { transaction => $transaction_id } }
+        );
+    $self->send_frame($begin_frame);
+
+    # send the message
+    my $receipt_id = $self->_get_next_transaction;
+    $conf->{receipt} = $receipt_id;
+    my $message_frame = Net::Stomp::Frame->new(
+        { command => 'SEND', headers => $conf, body => $body } );
+    $self->send_frame($message_frame);
+
+    # check the receipt
+    my $receipt_frame = $self->receive_frame;
+    if (   $receipt_frame->command eq 'RECEIPT'
+        && $receipt_frame->headers->{'receipt-id'} eq $receipt_id )
+    {
+
+        # success, commit the transaction
+        my $frame_commit = Net::Stomp::Frame->new(
+            {   command => 'COMMIT',
+                headers => { transaction => $transaction_id }
+            }
+        );
+        return $self->send_frame($frame_commit);
+    } else {
+
+        # some failure, abort transaction
+        my $frame_abort = Net::Stomp::Frame->new(
+            {   command => 'ABORT',
+                headers => { transaction => $transaction_id }
+            }
+        );
+        $self->send_frame($frame_abort);
+        return 0;
+    }
+}
+
+sub subscribe {
+    my ( $self, $conf ) = @_;
+    my $frame = Net::Stomp::Frame->new(
+        { command => 'SUBSCRIBE', headers => $conf } );
+    $self->send_frame($frame);
+    my $subs = $self->subscriptions;
+    $subs->{$conf->{'destination'}} = $conf;
+}
+
+sub unsubscribe {
+    my ( $self, $conf ) = @_;
+    my $frame = Net::Stomp::Frame->new(
+        { command => 'UNSUBSCRIBE', headers => $conf } );
+    $self->send_frame($frame);
+    my $subs = $self->subscriptions;
+    delete $subs->{$conf->{'destination'}};
+}
+
+sub ack {
+    my ( $self, $conf ) = @_;
+    my $id    = $conf->{frame}->headers->{'message-id'};
+    my $frame = Net::Stomp::Frame->new(
+        { command => 'ACK', headers => { 'message-id' => $id } } );
+    $self->send_frame($frame);
+}
+
+sub send_frame {
+    my ( $self, $frame ) = @_;
+
+    #     warn "send [" . $frame->as_string . "]\n";
+    $self->socket->print( $frame->as_string );
+    my $connected = $self->socket->connected;
+    unless (defined $connected) {
+        $self->_reconnect;
+        $self->send_frame($frame);
+    }
+}
+
+sub receive_frame {
+    my ($self, $conf) = @_;
+
+    # default is to block until we can read something.
+    $conf ||= { timeout => undef };
+
+    my $frame;
+    while (!$frame) {
+
+        # If the user passed in { timeout => 1 } then we wait for up to a
+        # second to read something. If we get no data in that time, then return
+        # undef.
+
+        # But if we get an error (cos we aren't connected) then we should
+        # reconnect and try again.
+        if ( $self->can_read($conf) ) {
+            eval {
+                $frame = Net::Stomp::Frame->parse( $self->socket );
+                1;
+            } or $self->_reconnect;
+        }
+        else {
+            return;
+        }
+    }
+    #     warn "receive [" . $frame->as_string . "]\n";
+    return $frame;
+}
+
+sub _get_next_transaction {
+    my $self = shift;
+    my $serial = $self->serial || 0;
+    $serial++;
+    $self->serial($serial);
+
+    return $self->session_id . '-' . $serial;
+}
+
+1;
+
+__END__
+
+=head1 NAME
+
+Net::Stomp - A Streaming Text Orientated Messaging Protocol Client
+
+=head1 SYNOPSIS
+
+  # send a message to the queue 'foo'
+  use Net::Stomp;
+  my $stomp = Net::Stomp->new( { hostname => 'localhost', port => '61613' } );
+  $stomp->connect( { login => 'hello', passcode => 'there' } );
+  $stomp->send(
+      { destination => '/queue/foo', body => 'test message' } );
+  $stomp->disconnect;
+
+  # subscribe to messages from the queue 'foo'
+  use Net::Stomp;
+  my $stomp = Net::Stomp->new( { hostname => 'localhost', port => '61613' } );
+  $stomp->connect( { login => 'hello', passcode => 'there' } );
+  $stomp->subscribe(
+      {   destination             => '/queue/foo',
+          'ack'                   => 'client',
+          'activemq.prefetchSize' => 1
+      }
+  );
+  while (1) {
+    my $frame = $stomp->receive_frame;
+    warn $frame->body; # do something here
+    $stomp->ack( { frame => $frame } );
+  }
+  $stomp->disconnect;
+
+  # write your own frame
+  my $frame = Net::Stomp::Frame->new(
+       { command => $command, headers => $conf, body => $body } );
+  $self->send_frame($frame);
+
+  # connect with failover supporting similar URI to ActiveMQ
+  $stomp = Net::Stomp->new({ failover => "failover://tcp://primary:61616" })
+  # "?randomize=..." and other parameters are ignored currently
+  $stomp = Net::Stomp->new({ failover => "failover:(tcp://primary:61616,tcp://secondary:61616)?randomize=false" })
+
+  # Or in a more natural perl way
+  $stomp = Net::Stomp->new({ hosts => [
+    { hostname => 'primary', port => 61616 },
+    { hostname => 'secondary', port => 61616 },
+  ] });
+
+=head1 DESCRIPTION
+
+This module allows you to write a Stomp client. Stomp is the Streaming
+Text Orientated Messaging Protocol (or the Protocol Briefly Known as
+TTMP and Represented by the symbol :ttmp). It's a simple and easy to
+implement protocol for working with Message Orientated Middleware from
+any language. L<Net::Stomp> is useful for talking to Apache ActiveMQ,
+an open source (Apache 2.0 licensed) Java Message Service 1.1 (JMS)
+message broker packed with many enterprise features.
+
+A Stomp frame consists of a command, a series of headers and a body -
+see L<Net::Stomp::Frame> for more details.
+
+For details on the protocol see L<http://stomp.codehaus.org/Protocol>.
+
+To enable the ActiveMQ Broker for Stomp add the following to the
+activemq.xml configuration inside the <transportConnectors> section:
+
+  <transportConnector name="stomp" uri="stomp://localhost:61613"/>
+
+To enable the ActiveMQ Broker for Stomp and SSL add the following
+inside the <transportConnectors> section:
+
+  <transportConnector name="stomp+ssl" uri="stomp+ssl://localhost:61612"/>
+
+For details on Stomp in ActiveMQ See L<http://activemq.apache.org/stomp.html>.
+
+=head1 METHODS
+
+=head2 new
+
+The constructor creates a new object. You must pass in a hostname and
+a port or set a failover configuration:
+
+  my $stomp = Net::Stomp->new( { hostname => 'localhost', port => '61613' } );
+
+If you want to use SSL, make sure you have L<IO::Socket::SSL> and
+pass in the SSL flag:
+
+  my $stomp = Net::Stomp->new( {
+    hostname => 'localhost',
+    port     => '61612',
+    ssl      => 1,
+  } );
+
+If you want to pass in L<IO::Socket::SSL> options:
+
+  my $stomp = Net::Stomp->new( {
+    hostname    => 'localhost',
+    port        => '61612',
+    ssl         => 1,
+    ssl_options => { SSL_cipher_list => 'ALL:!EXPORT' },
+  } );
+
+=head3 Failover
+
+There is experiemental failover support in Net::Stomp. You can specify failover
+in a similar maner to ActiveMQ
+(L<http://activemq.apache.org/failover-transport-reference.html>) for
+similarity with Java configs or using a more natural method to perl of passing
+in an array-of-hashrefs in the C<hosts> parameter.
+
+Currently when ever Net::Stomp connects or reconnects it will simply try the
+next host in the list.
+
+=head2 connect
+
+This connects to the Stomp server. You may pass in a C<login> and
+C<passcode> options.
+
+You may also pass in 'client-id', which specifies the JMS Client ID which is
+used in combination to the activemqq.subscriptionName to denote a durable
+subscriber.
+  
+  $stomp->connect( { login => 'hello', passcode => 'there' } );
+
+=head2 send
+
+This sends a message to a queue or topic. You must pass in a destination and a
+body.
+
+  $stomp->send(
+      { destination => '/queue/foo', body => 'test message' } );
+
+To send a BytesMessage, you should set the field 'bytes_message' to 1.
+
+=head2 send_transactional
+
+This sends a message in transactional mode and fails if the receipt of the
+message is not acknowledged by the server:
+
+  $stomp->send_transactional(
+      { destination => '/queue/foo', body => 'test message' }
+  ) or die "Couldn't send the message!";
+
+If using ActiveMQ, you might also want to make the message persistent:
+
+  $stomp->send_transactional(
+      { destination => '/queue/foo', body => 'test message', persistent => 'true' }
+  ) or die "Couldn't send the message!";
+
+=head2 disconnect
+
+This disconnects from the Stomp server:
+
+  $stomp->disconnect;
+
+=head2 subscribe
+
+This subscribes you to a queue or topic. You must pass in a destination.
+
+The acknowledge mode defaults to 'auto', which means that frames will
+be considered delivered after they have been sent to a client. The
+other option is 'client', which means that messages will only be
+considered delivered after the client specifically acknowledges them
+with an ACK frame.
+
+Other options:
+
+'selector': which specifies a JMS Selector using SQL
+92 syntax as specified in the JMS 1.1 specificiation. This allows a
+filter to be applied to each message as part of the subscription.
+
+'activemq.dispatchAsync': should messages be dispatched synchronously
+or asynchronously from the producer thread for non-durable topics in
+the broker. For fast consumers set this to false. For slow consumers
+set it to true so that dispatching will not block fast consumers.
+
+'activemq.exclusive': Would I like to be an Exclusive Consumer on a queue.
+
+'activemq.maximumPendingMessageLimit': For Slow Consumer Handlingon
+non-durable topics by dropping old messages - we can set a maximum
+pending limit which once a slow consumer backs up to this high water
+mark we begin to discard old messages.
+ 
+'activemq.noLocal': Specifies whether or not locally sent messages
+should be ignored for subscriptions. Set to true to filter out locally
+sent messages.
+ 
+'activemq.prefetchSize': Specifies the maximum number of pending
+messages that will be dispatched to the client. Once this maximum is
+reached no more messages are dispatched until the client acknowledges
+a message. Set to 1 for very fair distribution of messages across
+consumers where processing messages can be slow.
+ 
+'activemq.priority': Sets the priority of the consumer so that
+dispatching can be weighted in priority order.
+
+'activemq.retroactive': For non-durable topics do you wish this
+subscription to the retroactive.
+
+'activemq.subscriptionName': For durable topic subscriptions you must
+specify the same clientId on the connection and subscriberName on the
+subscribe.
+
+  $stomp->subscribe(
+      {   destination             => '/queue/foo',
+          'ack'                   => 'client',
+          'activemq.prefetchSize' => 1
+      }
+  );
+
+=head2 unsubscribe
+
+This unsubscribes you to a queue or topic. You must pass in a destination:
+
+  $stomp->unsubcribe({ destination => '/queue/foo' });
+
+=head2 receive_frame
+
+This blocks and returns you the next Stomp frame. 
+
+  my $frame = $stomp->receive_frame;
+  warn $frame->body; # do something here
+
+The header bytes_message is 1 if the message was a BytesMessage.
+
+By default this method will block until a frame can be returned. If you wish to
+wait for a specified time pass a C<timeout> argument:
+
+  # Wait half a second for a frame, else return undef
+  $stomp->receive_frame({ timeout => 0.5 })
+
+=head2 can_read
+
+This returns whether a frame is waiting to be read. Optionally takes a
+timeout in seconds:
+
+  my $can_read = $stomp->can_read;
+  my $can_read = $stomp->can_read({ timeout => '0.1' });
+
+
+=head2 ack
+
+This acknowledges that you have received and processed a frame (if you
+are using client acknowledgements):
+
+  $stomp->ack( { frame => $frame } );
+
+=head2 send_frame
+
+If this module does not provide enough help for sending frames, you
+may construct your own frame and send it:
+
+  # write your own frame
+  my $frame = Net::Stomp::Frame->new(
+       { command => $command, headers => $conf, body => $body } );
+  $self->send_frame($frame);
+
+=head1 SEE ALSO
+
+L<Net::Stomp::Frame>.
+
+=head1 AUTHOR
+
+Leon Brocard <acme@astray.com>.
+Thom May <thom.may@betfair.com>.
+Ash Berlin <ash_github@firemirror.com>.
+
+=head1 COPYRIGHT
+
+Copyright (C) 2006-9, Leon Brocard
+Copyright (C) 2009, Thom May, Betfair.com
+Copyright (C) 2010, Ash Berlin, Net-a-Porter.com
+
+This module is free software; you can redistribute it or modify it
+under the same terms as Perl itself.
+

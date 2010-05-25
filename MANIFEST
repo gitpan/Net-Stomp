@@ -1,13 +1,13 @@
-Changes
-lib/Net/STOMP.pm
-lib/Net/STOMP/Debug.pm
-lib/Net/STOMP/Error.pm
-lib/Net/STOMP/Frame.pm
-lib/Net/STOMP/IO.pm
-lib/Net/STOMP/OO.pm
-Makefile.PL
-MANIFEST
-META.yml			Module meta-data (added by MakeMaker)
+Build.PL
+CHANGES
+examples/send.pl
+examples/subscribe.pl
+lib/Net/Stomp.pm
+lib/Net/Stomp/Frame.pm
+MANIFEST			This list of files
+MANIFEST.SKIP
+META.yml
 README
-t/00-load.t
 t/pod.t
+t/pod_coverage.t
+Makefile.PL
