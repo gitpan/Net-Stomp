@@ -6,7 +6,7 @@ use IO::Select;
 use Net::Stomp::Frame;
 use Carp;
 use base 'Class::Accessor::Fast';
-our $VERSION = '0.35';
+our $VERSION = '0.36';
 __PACKAGE__->mk_accessors( qw(
     _cur_host failover hostname hosts port select serial session_id socket ssl
     ssl_options subscriptions _connect_headers
@@ -39,11 +39,22 @@ sub new {
     }
     $self->hosts(@hosts);
 
-    eval { $self->_get_connection};
-    while($@) {
-        sleep(5);
-        eval { $self->_get_connection};
+    my $err;
+    {
+        local $@ = 'run me!';
+        while($@) {
+            eval { $self->_get_connection };
+            last unless $@;
+            if (!@hosts || $self->_cur_host == $#hosts ) {
+                # We've cycled through all setup hosts. Die now. Can't die because
+                # $@ is localized.
+                $err = $@;
+                last;
+            }
+            sleep(5);
+        }
     }
+    die $err if $err;
     return $self;
 }
 
