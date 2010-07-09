@@ -6,7 +6,7 @@ use IO::Select;
 use Net::Stomp::Frame;
 use Carp;
 use base 'Class::Accessor::Fast';
-our $VERSION = '0.36';
+our $VERSION = '0.37';
 __PACKAGE__->mk_accessors( qw(
     _cur_host failover hostname hosts port select serial session_id socket ssl
     ssl_options subscriptions _connect_headers
@@ -85,7 +85,7 @@ sub _get_connection {
         $socket = IO::Socket::SSL->new(%sockopts);
     } else {
         $socket = IO::Socket::INET->new(%sockopts);
-        binmode($socket);
+        binmode($socket) if $socket;
     }
     die "Error connecting to " . $self->hostname . ':' . $self->port . ": $!"
         unless $socket;
@@ -140,7 +140,7 @@ sub _reconnect {
 sub can_read {
     my ( $self, $conf ) = @_;
     $conf ||= {};
-    my $timeout = exists $conf->{timeout} ? $conf->{timeout} : 0;
+    my $timeout = exists $conf->{timeout} ? $conf->{timeout} : undef;
     return $self->select->can_read($timeout) || 0;
 }
 
@@ -239,9 +239,6 @@ sub send_frame {
 
 sub receive_frame {
     my ($self, $conf) = @_;
-
-    # default is to block until we can read something.
-    $conf ||= { timeout => undef };
 
     my $frame;
     while (!$frame) {
@@ -517,6 +514,8 @@ timeout in seconds:
   my $can_read = $stomp->can_read;
   my $can_read = $stomp->can_read({ timeout => '0.1' });
 
+C<undef> says block until something can be read, C<0> says to poll and return
+immediately.
 
 =head2 ack
 

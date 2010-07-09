@@ -13,7 +13,7 @@ name: Net-Stomp
 provides:
   Net::Stomp:
     file: lib/Net/Stomp.pm
-    version: 0.36
+    version: 0.37
   Net::Stomp::Frame:
     file: lib/Net/Stomp/Frame.pm
 requires:
@@ -22,4 +22,4 @@ requires:
   IO::Socket::INET: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.36
+version: 0.37
