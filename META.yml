@@ -1,7 +1,7 @@
 ---
 abstract: 'A Streaming Text Orientated Messaging Protocol Client'
 author:
-  - "Leon Brocard <acme@astray.com>.\nThom May <thom.may@betfair.com>.\nAsh Berlin <ash_github@firemirror.com>."
+  - "Leon Brocard <acme@astray.com>,\nThom May <thom.may@betfair.com>,\nAsh Berlin <ash_github@firemirror.com>,\nMichael S. Fischer <michael@dynamine.net>"
 configure_requires:
   Module::Build: 0.36
 generated_by: 'Module::Build version 0.3603'
@@ -13,7 +13,7 @@ name: Net-Stomp
 provides:
   Net::Stomp:
     file: lib/Net/Stomp.pm
-    version: 0.38
+    version: 0.38_99
   Net::Stomp::Frame:
     file: lib/Net/Stomp/Frame.pm
 requires:
@@ -22,4 +22,4 @@ requires:
   IO::Socket::INET: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.38
+version: 0.38_99
