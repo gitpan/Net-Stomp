@@ -6,7 +6,7 @@ use IO::Select;
 use Net::Stomp::Frame;
 use Carp;
 use base 'Class::Accessor::Fast';
-our $VERSION = '0.38_99';
+our $VERSION = '0.39';
 
 __PACKAGE__->mk_accessors( qw(
     _cur_host failover hostname hosts port select serial session_id socket ssl
@@ -259,7 +259,17 @@ sub _read_data {
     my $len = $self->socket->sysread($self->{_framebuf},
                                      $self->bufsize,
                                      length($self->{_framebuf} || ''));
-    $self->{_framebuf_changed} = 1;
+
+    if ($len > 0) {
+        $self->{_framebuf_changed} = 1;
+    }
+    else {
+        # EOF detected - connection is gone. We have to reset the framebuf in
+        # case we had a partial frame in there that will never arrive.
+        $self->{_framebuf} = "";
+        delete $self->{_command};
+        delete $self->{_headers};
+    }
     return $len;
 }
 
@@ -319,6 +329,11 @@ sub receive_frame {
     my ($self, $conf) = @_;
 
     my $timeout = exists $conf->{timeout} ? $conf->{timeout} : undef;
+
+    my $connected = $self->socket->connected;
+    unless (defined $connected) {
+        $self->_reconnect;
+    }
 
     my $done = 0;
     while ( not $done = $self->_read_headers ) {
