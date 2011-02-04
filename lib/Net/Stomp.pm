@@ -6,7 +6,7 @@ use IO::Select;
 use Net::Stomp::Frame;
 use Carp;
 use base 'Class::Accessor::Fast';
-our $VERSION = '0.39';
+our $VERSION = '0.40';
 
 __PACKAGE__->mk_accessors( qw(
     _cur_host failover hostname hosts port select serial session_id socket ssl
@@ -260,7 +260,7 @@ sub _read_data {
                                      $self->bufsize,
                                      length($self->{_framebuf} || ''));
 
-    if ($len > 0) {
+    if ($len && $len > 0) {
         $self->{_framebuf_changed} = 1;
     }
     else {
@@ -298,7 +298,7 @@ sub _read_body {
     if ($h->{'content-length'}) {
         if (length($self->{_framebuf}) >= $h->{'content-length'}) {
             $self->{_framebuf_changed} = 1;
-            my $body = substr($self->{framebuf},
+            my $body = substr($self->{_framebuf},
                               0,
                               $h->{'content-length'},
                               undef );
