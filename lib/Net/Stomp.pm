@@ -6,7 +6,7 @@ use IO::Select;
 use Net::Stomp::Frame;
 use Carp;
 use base 'Class::Accessor::Fast';
-our $VERSION = '0.40';
+our $VERSION = '0.41';
 
 __PACKAGE__->mk_accessors( qw(
     _cur_host failover hostname hosts port select serial session_id socket ssl
@@ -37,10 +37,15 @@ sub new {
                 unless $uris;
 
         foreach my $host (split(/,/,$uris)) {
-            my ($hostname, $port) = ($host =~ m{^\w+://([a-zA-Z0-9\-./]+):([0-9]+)$})
-              || confess "Unable to parse failover component: '$host'";
+            $host =~ m{^\w+://([a-zA-Z0-9\-./]+):([0-9]+)$} || confess "Unable to parse failover component: '$host'";
+            my ($hostname, $port) = ($1, $2);
+
             push(@hosts, {hostname => $hostname, port => $port});
         }
+    } elsif ($self->hosts) {
+        ## @hosts is used inside the while loop later to decide whether we have
+        ## cycled through all setup hosts.
+        @hosts = @{$self->hosts};
     }
     $self->hosts(@hosts);
 
@@ -92,7 +97,7 @@ sub _get_connection {
         $socket = IO::Socket::INET->new(%sockopts);
         binmode($socket) if $socket;
     }
-    die "Error connecting to " . $self->hostname . ':' . $self->port . ": $!"
+    die "Error connecting to " . $self->hostname . ':' . $self->port . ": $@"
         unless $socket;
 
     $self->select->remove($self->socket) if $self->socket;
@@ -301,7 +306,7 @@ sub _read_body {
             my $body = substr($self->{_framebuf},
                               0,
                               $h->{'content-length'},
-                              undef );
+                              '' );
 
             # Trim the trailer off the frame.
             $self->{_framebuf} =~ s/^.*?\000\n*//s;
@@ -627,6 +632,7 @@ Leon Brocard <acme@astray.com>,
 Thom May <thom.may@betfair.com>,
 Ash Berlin <ash_github@firemirror.com>,
 Michael S. Fischer <michael@dynamine.net>
+Vigith Maurice <vigith@yahoo-inc.com>
 
 =head1 COPYRIGHT
 
