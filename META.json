@@ -1,0 +1,47 @@
+{
+   "abstract" : "A Streaming Text Orientated Messaging Protocol Client",
+   "author" : [
+      "Leon Brocard <acme@astray.com>,\nThom May <thom.may@betfair.com>,\nMichael S. Fischer <michael@dynamine.net>,\nAsh Berlin <ash_github@firemirror.com>"
+   ],
+   "dynamic_config" : 1,
+   "generated_by" : "Module::Build version 0.38, CPAN::Meta::Converter version 2.110930",
+   "license" : [
+      "perl_5"
+   ],
+   "meta-spec" : {
+      "url" : "http://search.cpan.org/perldoc?CPAN::Meta::Spec",
+      "version" : "2"
+   },
+   "name" : "Net-Stomp",
+   "prereqs" : {
+      "configure" : {
+         "requires" : {
+            "Module::Build" : "0.38"
+         }
+      },
+      "runtime" : {
+         "requires" : {
+            "Class::Accessor::Fast" : 0,
+            "IO::Select" : 0,
+            "IO::Socket::INET" : 0
+         }
+      }
+   },
+   "provides" : {
+      "Net::Stomp" : {
+         "file" : "lib/Net/Stomp.pm",
+         "version" : "0.43"
+      },
+      "Net::Stomp::Frame" : {
+         "file" : "lib/Net/Stomp/Frame.pm",
+         "version" : 0
+      }
+   },
+   "release_status" : "stable",
+   "resources" : {
+      "license" : [
+         "http://dev.perl.org/licenses/"
+      ]
+   },
+   "version" : "0.43"
+}
