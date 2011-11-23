@@ -10,4 +10,3 @@
 \.swp$
 ^_build/
 ^blib/
-^MYMETA\.json$

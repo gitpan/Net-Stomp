@@ -4,7 +4,7 @@
       "Leon Brocard <acme@astray.com>,\nThom May <thom.may@betfair.com>,\nMichael S. Fischer <michael@dynamine.net>,\nAsh Berlin <ash_github@firemirror.com>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "Module::Build version 0.38, CPAN::Meta::Converter version 2.110930",
+   "generated_by" : "Module::Build version 0.38, CPAN::Meta::Converter version 2.112150",
    "license" : [
       "perl_5"
    ],
@@ -30,7 +30,7 @@
    "provides" : {
       "Net::Stomp" : {
          "file" : "lib/Net/Stomp.pm",
-         "version" : "0.43"
+         "version" : "0.44"
       },
       "Net::Stomp::Frame" : {
          "file" : "lib/Net/Stomp/Frame.pm",
@@ -43,5 +43,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.43"
+   "version" : "0.44"
 }

@@ -6,7 +6,7 @@ build_requires: {}
 configure_requires:
   Module::Build: 0.38
 dynamic_config: 1
-generated_by: 'Module::Build version 0.38, CPAN::Meta::Converter version 2.110930'
+generated_by: 'Module::Build version 0.38, CPAN::Meta::Converter version 2.112150'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -15,7 +15,7 @@ name: Net-Stomp
 provides:
   Net::Stomp:
     file: lib/Net/Stomp.pm
-    version: 0.43
+    version: 0.44
   Net::Stomp::Frame:
     file: lib/Net/Stomp/Frame.pm
     version: 0
@@ -25,4 +25,4 @@ requires:
   IO::Socket::INET: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.43
+version: 0.44
