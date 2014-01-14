@@ -1,12 +1,15 @@
 ---
 abstract: 'A Streaming Text Orientated Messaging Protocol Client'
 author:
-  - "Leon Brocard <acme@astray.com>,\nThom May <thom.may@betfair.com>,\nMichael S. Fischer <michael@dynamine.net>,\nAsh Berlin <ash_github@firemirror.com>"
+  - 'Leon Brocard <acme@astray.com>,'
+  - 'Thom May <thom.may@betfair.com>,'
+  - 'Michael S. Fischer <michael@dynamine.net>,'
+  - 'Ash Berlin <ash_github@firemirror.com>'
 build_requires: {}
 configure_requires:
-  Module::Build: 0.38
+  Module::Build: 0.40
 dynamic_config: 1
-generated_by: 'Module::Build version 0.38, CPAN::Meta::Converter version 2.110930'
+generated_by: 'Module::Build version 0.4007, CPAN::Meta::Converter version 2.132140'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -15,14 +18,16 @@ name: Net-Stomp
 provides:
   Net::Stomp:
     file: lib/Net/Stomp.pm
-    version: 0.45
+    version: 0.46
   Net::Stomp::Frame:
     file: lib/Net/Stomp/Frame.pm
-    version: 0
+recommends:
+  IO::Socket::IP: 0.20
+  IO::Socket::SSL: 1.75
 requires:
   Class::Accessor::Fast: 0
   IO::Select: 0
   IO::Socket::INET: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.45
+version: 0.46
