@@ -3,22 +3,42 @@ use strict;
 use warnings;
 use IO::Select;
 use Net::Stomp::Frame;
-use Carp;
+use Carp qw(longmess);
 use base 'Class::Accessor::Fast';
-our $VERSION = '0.46';
+use Net::Stomp::StupidLogger;
+our $VERSION = '0.47';
 
 __PACKAGE__->mk_accessors( qw(
     _cur_host failover hostname hosts port select serial session_id socket ssl
     ssl_options subscriptions _connect_headers bufsize
-    reconnect_on_fork
+    reconnect_on_fork logger connect_delay
+    reconnect_attempts initial_reconnect_attempts
 ) );
+
+sub _logconfess {
+    my ($self,@etc) = @_;
+    my $m = longmess(@etc);
+    $self->logger->fatal($m);
+    die $m;
+}
+sub _logdie {
+    my ($self,@etc) = @_;
+    $self->logger->fatal(@etc);
+    die "@etc";
+}
 
 sub new {
     my $class = shift;
     my $self  = $class->SUPER::new(@_);
 
     $self->bufsize(8192) unless $self->bufsize;
+    $self->connect_delay(5) unless defined $self->connect_delay;
     $self->reconnect_on_fork(1) unless defined $self->reconnect_on_fork;
+    $self->reconnect_attempts(0) unless defined $self->reconnect_attempts;
+    $self->initial_reconnect_attempts(1) unless defined $self->initial_reconnect_attempts;
+
+    $self->logger(Net::Stomp::StupidLogger->new())
+        unless $self->logger;
 
     $self->{_framebuf} = "";
 
@@ -34,11 +54,11 @@ sub new {
     if ($self->failover) {
         my ($uris, $opts) = $self->failover =~ m{^failover:(?://)? \(? (.*?) \)? (?: \? (.*?) ) ?$}ix;
 
-        confess "Unable to parse failover uri: " . $self->failover
-                unless $uris;
+        $self->_logconfess("Unable to parse failover uri: " . $self->failover)
+            unless $uris;
 
         foreach my $host (split(/,/,$uris)) {
-            $host =~ m{^\w+://([a-zA-Z0-9\-./]+):([0-9]+)$} || confess "Unable to parse failover component: '$host'";
+            $host =~ m{^\w+://([a-zA-Z0-9\-./]+):([0-9]+)$} || $self->_logconfess("Unable to parse failover component: '$host'");
             my ($hostname, $port) = ($1, $2);
 
             push(@hosts, {hostname => $hostname, port => $port});
@@ -48,25 +68,42 @@ sub new {
         ## cycled through all setup hosts.
         @hosts = @{$self->hosts};
     }
-    $self->hosts(@hosts);
+    $self->hosts(\@hosts) if @hosts;
 
-    my $err;
-    {
-        local $@ = 'run me!';
-        while($@) {
-            eval { $self->_get_connection };
-            last unless $@;
-            if (!@hosts || $self->_cur_host == $#hosts ) {
-                # We've cycled through all setup hosts. Die now. Can't die because
-                # $@ is localized.
-                $err = $@;
-                last;
-            }
-            sleep(5);
-        }
-    }
-    die $err if $err;
+    $self->_get_connection_retrying(1);
+
     return $self;
+}
+
+sub _get_connection_retrying {
+    my ($self,$initial) = @_;
+
+    my $tries=0;
+    while(not eval { $self->_get_connection; 1 }) {
+        my $err = $@;$err =~ s{\n\z}{}sm;
+        ++$tries;
+        if($self->_should_stop_trying($initial,$tries)) {
+            # We've cycled enough. Die now.
+            $self->_logdie("Failed to connect: $err; giving up");
+        }
+        $self->logger->warn("Failed to connect: $err; retrying");
+        sleep($self->connect_delay);
+    }
+}
+
+sub _should_stop_trying {
+    my ($self,$initial,$tries) = @_;
+
+    my $max_tries = $initial
+        ? $self->initial_reconnect_attempts
+        : $self->reconnect_attempts;
+
+    return unless $max_tries > 0; # 0 means forever
+
+    if (defined $self->hosts) {
+        $max_tries *= @{$self->hosts}; # try at least once per host
+    }
+    return $tries >= $max_tries;
 }
 
 my $socket_class;
@@ -81,7 +118,21 @@ sub _get_connection {
         $self->hostname($hosts->[$self->_cur_host]->{hostname});
         $self->port($hosts->[$self->_cur_host]->{port});
     }
-    my ($socket);
+    my $socket = $self->_get_socket;
+    $self->_logdie("Error connecting to " . $self->hostname . ':' . $self->port . ": $!")
+        unless $socket;
+
+    $self->select->remove($self->socket);
+
+    $self->select->add($socket);
+    $self->socket($socket);
+    $self->{_pid} = $$;
+}
+
+sub _get_socket {
+    my ($self) = @_;
+    my $socket;
+
     my %sockopts = (
         PeerAddr => $self->hostname,
         PeerPort => $self->port,
@@ -90,9 +141,9 @@ sub _get_connection {
     );
     if ( $self->ssl ) {
         eval { require IO::Socket::SSL };
-        die
+        $self->_logdie(
             "You should install the IO::Socket::SSL module for SSL support in Net::Stomp"
-            if $@;
+        ) if $@;
         %sockopts = ( %sockopts, %{ $self->ssl_options || {} } );
         $socket = IO::Socket::SSL->new(%sockopts);
     } else {
@@ -101,14 +152,8 @@ sub _get_connection {
         $socket = $socket_class->new(%sockopts);
         binmode($socket) if $socket;
     }
-    die "Error connecting to " . $self->hostname . ':' . $self->port . ": $@"
-        unless $socket;
 
-    $self->select->remove($self->socket) if $self->socket;
-
-    $self->select->add($socket);
-    $self->socket($socket);
-    $self->{_pid} = $$;
+    return $socket;
 }
 
 sub connect {
@@ -119,32 +164,39 @@ sub connect {
     $self->send_frame($frame);
     $frame = $self->receive_frame;
 
-    # Setting initial values for session id, as given from
-    # the stomp server
-    $self->session_id( $frame->headers->{session} );
-    $self->_connect_headers( $conf );
+    if ($frame && $frame->command eq 'CONNECTED') {
+        # Setting initial values for session id, as given from
+        # the stomp server
+        $self->session_id( $frame->headers->{session} );
+        $self->_connect_headers( $conf );
+    }
 
     return $frame;
+}
+
+sub _close_socket {
+    my ($self) = @_;
+    return unless $self->socket;
+    $self->socket->close;
+    $self->select->remove($self->socket);
 }
 
 sub disconnect {
     my $self = shift;
     my $frame = Net::Stomp::Frame->new( { command => 'DISCONNECT' } );
     $self->send_frame($frame);
-    $self->socket->close;
-    $self->select->remove($self->socket);
+    $self->_close_socket;
 }
 
 sub _reconnect {
     my $self = shift;
-    if ($self->socket) {
-        $self->socket->close;
-    }
-    eval { $self->_get_connection };
-    while ($@) {
-        sleep(5);
-        eval { $self->_get_connection };
-    }
+    $self->_close_socket;
+
+    $self->logger->warn("reconnecting");
+    $self->_get_connection_retrying(0);
+    # Both ->connect and ->subscribe can call _reconnect. It *should*
+    # work out fine in the end, worst scenario we send a few subscribe
+    # frame more than once
     $self->connect( $self->_connect_headers );
     for my $sub(keys %{$self->subscriptions}) {
         $self->subscribe($self->subscriptions->{$sub});
@@ -193,13 +245,20 @@ sub send_transactional {
     # send the message
     my $receipt_id = $self->_get_next_transaction;
     $conf->{receipt} = $receipt_id;
+    $conf->{transaction} = $transaction_id;
     my $message_frame = Net::Stomp::Frame->new(
         { command => 'SEND', headers => $conf, body => $body } );
     $self->send_frame($message_frame);
 
     # check the receipt
     my $receipt_frame = $self->receive_frame;
-    if (   $receipt_frame->command eq 'RECEIPT'
+
+    if (@_ > 2) {
+        $_[2] = $receipt_frame;
+    }
+
+    if (   $receipt_frame
+        && $receipt_frame->command eq 'RECEIPT'
         && $receipt_frame->headers->{'receipt-id'} eq $receipt_id )
     {
 
@@ -209,7 +268,8 @@ sub send_transactional {
                 headers => { transaction => $transaction_id }
             }
         );
-        return $self->send_frame($frame_commit);
+        $self->send_frame($frame_commit);
+        return 1;
     } else {
 
         # some failure, abort transaction
@@ -251,8 +311,9 @@ sub unsubscribe {
 sub ack {
     my ( $self, $conf ) = @_;
     my $id    = $conf->{frame}->headers->{'message-id'};
+    delete $conf->{frame};
     my $frame = Net::Stomp::Frame->new(
-        { command => 'ACK', headers => { 'message-id' => $id } } );
+        { command => 'ACK', headers => { 'message-id' => $id, %$conf } } );
     $self->send_frame($frame);
 }
 
@@ -262,19 +323,23 @@ sub send_frame {
     if (not defined $self->_connected) {
         $self->_reconnect;
         if (not defined $self->_connected) {
-            warn q{wasn't connected; couldn't _reconnect()};
+            $self->_logdie(q{wasn't connected; couldn't _reconnect()});
         }
     }
-    my $written = $self->socket->syswrite( $frame->as_string );
-    if (($written||0) != length($frame->as_string)) {
-        warn 'only wrote '
-            . ($written||0)
-            . ' characters out of the '
-            . length($frame->as_string)
-            . ' character frame';
-        warn 'problem frame: <<' . $frame->as_string . '>>';
+    # keep writing until we finish, or get an error
+    my $to_write = my $frame_string = $frame->as_string;
+    my $written;
+    while (length($to_write)) {
+        local $SIG{PIPE}='IGNORE'; # just in case writing to a closed
+                                   # socket kills us
+        $written = $self->socket->syswrite($to_write);
+        last unless defined $written;
+        substr($to_write,0,$written,'');
     }
-    unless (defined $self->_connected) {
+    if (not defined $written) {
+        $self->logger->warn("error writing frame <<$frame_string>>: $!");
+    }
+    unless (defined $written && defined $self->_connected) {
         $self->_reconnect;
         $self->send_frame($frame);
     }
@@ -288,12 +353,17 @@ sub _read_data {
                                      $self->bufsize,
                                      length($self->{_framebuf} || ''));
 
-    if ($len && $len > 0) {
+    if (defined $len && $len>0) {
         $self->{_framebuf_changed} = 1;
     }
     else {
-        # EOF detected - connection is gone. We have to reset the framebuf in
-        # case we had a partial frame in there that will never arrive.
+        if (!defined $len) {
+            $self->logger->warn("error reading frame: $!");
+        }
+        # EOF or error detected - connection is gone. We have to reset
+        # the framebuf in case we had a partial frame in there that
+        # will never arrive.
+        $self->_close_socket;
         $self->{_framebuf} = "";
         delete $self->{_command};
         delete $self->{_headers};
@@ -312,7 +382,8 @@ sub _read_headers {
         }
         foreach my $line (split(/\n/, $raw_headers)) {
             my ($key, $value) = split(/\s*:\s*/, $line, 2);
-            $self->{_headers}->{$key} = $value;
+            $self->{_headers}{$key} = $value
+                unless defined $self->{_headers}{$key};
         }
         return 1;
     }
@@ -432,6 +503,10 @@ Net::Stomp - A Streaming Text Orientated Messaging Protocol Client
   );
   while (1) {
     my $frame = $stomp->receive_frame;
+    if (!defined $frame) {
+      # maybe log connection problems
+      next; # will reconnect automatically
+    }
     warn $frame->body; # do something here
     $stomp->ack( { frame => $frame } );
   }
@@ -466,7 +541,15 @@ message broker packed with many enterprise features.
 A Stomp frame consists of a command, a series of headers and a body -
 see L<Net::Stomp::Frame> for more details.
 
-For details on the protocol see L<http://stomp.codehaus.org/Protocol>.
+For details on the protocol see L<https://stomp.github.io/>.
+
+In long-lived processes, you can use a new C<Net::Stomp> object to
+send each message, but it's more polite to the broker to keep a single
+object around and re-use it for multiple messages; this reduce the
+number of TCP connections that have to be established. C<Net::Stomp>
+tries very hard to re-connect whenever something goes wrong.
+
+=head2 ActiveMQ-specific suggestions
 
 To enable the ActiveMQ Broker for Stomp add the following to the
 activemq.xml configuration inside the <transportConnectors> section:
@@ -480,9 +563,9 @@ inside the <transportConnectors> section:
 
 For details on Stomp in ActiveMQ See L<http://activemq.apache.org/stomp.html>.
 
-=head1 METHODS
+=head1 CONSTRUCTOR
 
-=head2 new
+=head2 C<new>
 
 The constructor creates a new object. You must pass in a hostname and
 a port or set a failover configuration:
@@ -507,47 +590,156 @@ If you want to pass in L<IO::Socket::SSL> options:
     ssl_options => { SSL_cipher_list => 'ALL:!EXPORT' },
   } );
 
+You can pass a logger object, for example a L<Log::Log4perl> logger:
+
+  my $stomp = Net::Stomp->new({
+    hostname => 'localhost',
+    port     => '61613',
+    logger   => Log::Log4perl->get_logger('stomp'),
+  });
+
+Warnings and errors will be logged instead of written to C<STDERR>.
+
 =head3 Failover
 
-There is experiemental failover support in Net::Stomp. You can specify failover
-in a similar maner to ActiveMQ
+There is some failover support in C<Net::Stomp>. You can specify
+L<< /C<failover> >> in a similar manner to ActiveMQ
 (L<http://activemq.apache.org/failover-transport-reference.html>) for
-similarity with Java configs or using a more natural method to perl of passing
-in an array-of-hashrefs in the C<hosts> parameter.
+similarity with Java configs or using a more natural method to Perl of
+passing in an array-of-hashrefs in the C<hosts> parameter.
 
-Currently when ever Net::Stomp connects or reconnects it will simply try the
-next host in the list.
+When C<Net::Stomp> connects the first time, upon construction, it will
+simply try each host in the list, stopping at the first one that
+accepts the connection, dying if no connection attempt is
+successful. You can set L<< /C<initial_reconnect_attempts> >> to 0 to
+mean "keep looping forever", or to an integer value to mean "only go
+through the list of hosts this many times" (the default value is
+therefore 1).
+
+When C<Net::Stomp> notices that the connection has been lost (inside
+L<< /C<send_frame> >> or L<< /C<receive_frame> >>), it will try to
+re-connect. In this case, the number of connection attempts will be
+limited by L<< /C<reconnect_attempts> >>, which defaults to 0, meaning
+"keep trying forever".
 
 =head3 Reconnect on C<fork>
 
 By default Net::Stomp will reconnect, using a different socket, if the
 process C<fork>s. This avoids problems when parent & child write to
 the socket at the same time. If, for whatever reason, you don't want
-this to happen, set C<reconnect_on_fork> to C<0> (either as a
+this to happen, set L<< /C<reconnect_on_fork> >> to C<0> (either as a
 constructor parameter, or by calling the method).
 
-=head2 connect
+=head1 ATTRIBUTES
 
-This connects to the Stomp server. You may pass in a C<login> and
-C<passcode> options.
+These can be passed as constructor parameters, or used as read/write
+accessors.
 
-You may also pass in 'client-id', which specifies the JMS Client ID which is
-used in combination to the activemqq.subscriptionName to denote a durable
-subscriber.
+=head2 C<hostname>
+
+If you want to connect to a single broker, you can specify its
+hostname here. If you modify this value during the lifetime of the
+object, the new value will be used for the subsequent reconnect
+attempts.
+
+=head2 C<port>
+
+If you want to connect to a single broker, you can specify its
+port here. If you modify this value during the lifetime of the
+object, the new value will be used for the subsequent reconnect
+attempts.
+
+=head2 C<failover>
+
+Modifying this attribute after the object has been constructed has no
+effect. Pass this as a constructor parameter only. Its value must be a
+URL (as a string) in the form:
+
+   failover://(tcp://$hostname1:$port1,tcp://$hostname2:$port,...)
+
+This is equivalent to setting L<< /C<hosts> >> to:
+
+  [ { hostname => $hostname1, port => $port1 },
+    { hostname => $hostname2, port => $port2 } ]
+
+=head2 C<hosts>
+
+Arrayref of hashrefs, each having a C<hostname> key and a C<port>
+key. Connections will be attempted in order, looping around if
+necessary, depending on the values of L<<
+/C<initial_reconnect_attempts> >> and L<< /C<reconnect_attempts> >>.
+
+=head2 C<ssl>
+
+Boolean, defaults to false, whether we should use SSL to talk to the
+brokers. Yes, this is global to all the L<< /C<hosts> >>, although it
+really should be per-host.
+
+=head2 C<ssl_options>
+
+Options to pass to L<< /C<IO::Socket::SSL> >> when connecting via SSL.
+
+=head2 C<logger>
+
+Optional logger object, the default one just logs to C<STDERR> (see
+L<Net::Stomp::StupidLogger>). You can pass in any object that
+implements (at least) the C<warn> and C<fatal> methods. They will be
+passed a string to log.
+
+=head2 C<reconnect_on_fork>
+
+Boolean, defaults to true. Reconnect if a method is being invoked from
+a different process than the one that created the object. Don't change
+this unless you really know what you're doing.
+
+=head2 C<initial_reconnect_attempts>
+
+Integer, how many times to loop through the L<< /C<hosts> >> trying to
+connect, before giving up and throwing an exception, during the
+construction of the object. Defaults to 1. 0 means "keep trying
+forever". Between each connection attempt there will be a sleep of L<<
+/C<connect_delay> >> seconds.
+
+=head2 C<reconnect_attempts>
+
+Integer, how many times to loop through the L<< /C<hosts> >> trying to
+connect, before giving up and throwing an exception, during L<<
+/C<send_frame> >> or L<< /C<receive_frame> >>. Defaults to 0, meaning
+"keep trying forever". Between each connection attempt there will be a
+sleep of L<< /C<connect_delay> >> seconds.
+
+=head2 C<connect_delay>
+
+Integer, defaults to 5. How many seconds to sleep between connection
+attempts to brokers.
+
+=head1 METHODS
+
+=head2 C<connect>
+
+This starts the Stomp session with the Stomp server. You may pass in a
+C<login> and C<passcode> options, plus whatever other headers you may
+need (e.g. C<client-id>, C<host>).
 
   $stomp->connect( { login => 'hello', passcode => 'there' } );
 
-=head2 send
+Returns the frame that the server responded with (or C<undef> if the
+connection was lost). If that frame's command is not C<CONNECTED>,
+something went wrong.
 
-This sends a message to a queue or topic. You must pass in a destination and a
-body.
+=head2 C<send>
 
-  $stomp->send(
-      { destination => '/queue/foo', body => 'test message' } );
+This sends a message to a queue or topic. You must pass in a
+destination and a body (which must be a string of bytes). You can also
+pass whatever other headers you may need (e.g. C<transaction>).
 
-To send a BytesMessage, you should set the field 'bytes_message' to 1.
+  $stomp->send( { destination => '/queue/foo', body => 'test message' } );
 
-=head2 send_transactional
+It's probably a good idea to pass a C<content-length> corresponding to
+the byte length of the C<body>; this is necessary if the C<body>
+contains a byte 0.
+
+=head2 C<send_transactional>
 
 This sends a message in transactional mode and fails if the receipt of the
 message is not acknowledged by the server:
@@ -562,59 +754,126 @@ If using ActiveMQ, you might also want to make the message persistent:
       { destination => '/queue/foo', body => 'test message', persistent => 'true' }
   ) or die "Couldn't send the message!";
 
-=head2 disconnect
+The actual frame sequence for a successful sending is:
+
+  -> BEGIN
+  -> SEND
+  <- RECEIPT
+  -> COMMIT
+
+The actual frame sequence for a failed sending is:
+
+  -> BEGIN
+  -> SEND
+  <- anything but RECEIPT
+  -> ABORT
+
+If you are using this connection only to send (i.e. you've never
+called L<< /C<subscribe> >>), the only thing that could be received
+instead of a C<RECEIPT> is an C<ERROR> frame, but if you subscribed,
+the broker may well send a C<MESSAGE> before sending the
+C<RECEIPT>. B<DO NOT> use this method on a connection used for
+receiving.
+
+If you want to see the C<RECEIPT> or C<ERROR> frame, pass a scalar as
+a second parameter to the method, and it will be set to the received
+frame:
+
+  my $success = $stomp->send_transactional(
+      { destination => '/queue/foo', body => 'test message' },
+      $received_frame,
+  );
+  if (not $success) { warn $received_frame->as_string }
+
+=head2 C<disconnect>
 
 This disconnects from the Stomp server:
 
   $stomp->disconnect;
 
-=head2 subscribe
+If you call any other method after this, a new connection will be
+established automatically (to the next failover host, if there's more
+than one).
 
-This subscribes you to a queue or topic. You must pass in a destination.
+=head2 C<subscribe>
 
-The acknowledge mode defaults to 'auto', which means that frames will
-be considered delivered after they have been sent to a client. The
-other option is 'client', which means that messages will only be
-considered delivered after the client specifically acknowledges them
-with an ACK frame.
+This subscribes you to a queue or topic. You must pass in a
+C<destination>.
+
+The acknowledge mode (header C<ack>) defaults to C<auto>, which means
+that frames will be considered delivered after they have been sent to
+a client. The other option is C<client>, which means that messages
+will only be considered delivered after the client specifically
+acknowledges them with an ACK frame (see L<< /C<ack> >>).
+
+When C<Net::Stomp> reconnects after a failure, all subscriptions will
+be re-instated, each with its own options.
 
 Other options:
 
-'selector': which specifies a JMS Selector using SQL
-92 syntax as specified in the JMS 1.1 specificiation. This allows a
-filter to be applied to each message as part of the subscription.
+=over 4
 
-'activemq.dispatchAsync': should messages be dispatched synchronously
-or asynchronously from the producer thread for non-durable topics in
-the broker. For fast consumers set this to false. For slow consumers
-set it to true so that dispatching will not block fast consumers.
+=item C<selector>
 
-'activemq.exclusive': Would I like to be an Exclusive Consumer on a queue.
+Specifies a JMS Selector using SQL 92 syntax as specified in the JMS
+1.1 specificiation. This allows a filter to be applied to each message
+as part of the subscription.
 
-'activemq.maximumPendingMessageLimit': For Slow Consumer Handlingon
-non-durable topics by dropping old messages - we can set a maximum
-pending limit which once a slow consumer backs up to this high water
-mark we begin to discard old messages.
+=item C<id>
 
-'activemq.noLocal': Specifies whether or not locally sent messages
-should be ignored for subscriptions. Set to true to filter out locally
-sent messages.
+A unique identifier for this subscription. Very useful if you
+subscribe to the same destination more than once (e.g. with different
+selectors), so that messages arriving will have a C<subscription>
+header with this value if they arrived because of this subscription.
 
-'activemq.prefetchSize': Specifies the maximum number of pending
-messages that will be dispatched to the client. Once this maximum is
-reached no more messages are dispatched until the client acknowledges
-a message. Set to 1 for very fair distribution of messages across
-consumers where processing messages can be slow.
+=item C<activemq.dispatchAsync>
 
-'activemq.priority': Sets the priority of the consumer so that
-dispatching can be weighted in priority order.
+Should messages be dispatched synchronously or asynchronously from the
+producer thread for non-durable topics in the broker. For fast
+consumers set this to false. For slow consumers set it to true so that
+dispatching will not block fast consumers.
 
-'activemq.retroactive': For non-durable topics do you wish this
-subscription to the retroactive.
+=item C<activemq.exclusive>
 
-'activemq.subscriptionName': For durable topic subscriptions you must
-specify the same clientId on the connection and subscriberName on the
-subscribe.
+Would I like to be an Exclusive Consumer on a queue.
+
+=item C<activemq.maximumPendingMessageLimit>
+
+For Slow Consumer Handling on non-durable topics by dropping old
+messages - we can set a maximum pending limit which once a slow
+consumer backs up to this high water mark we begin to discard old
+messages.
+
+=item C<activemq.noLocal>
+
+Specifies whether or not locally sent messages should be ignored for
+subscriptions. Set to true to filter out locally sent messages.
+
+=item C<activemq.prefetchSize>
+
+Specifies the maximum number of pending messages that will be
+dispatched to the client. Once this maximum is reached no more
+messages are dispatched until the client acknowledges a message. Set
+to 1 for very fair distribution of messages across consumers where
+processing messages can be slow.
+
+=item C<activemq.priority>
+
+Sets the priority of the consumer so that dispatching can be weighted
+in priority order.
+
+=item C<activemq.retroactive>
+
+For non-durable topics do you wish this subscription to the
+retroactive.
+
+=item C<activemq.subscriptionName>
+
+For durable topic subscriptions you must specify the same L<<
+/C<client-id> >> on the connection and L<< /C<subscriptionName> >> on
+the subscribe.
+
+=back
 
   $stomp->subscribe(
       {   destination             => '/queue/foo',
@@ -623,20 +882,20 @@ subscribe.
       }
   );
 
-=head2 unsubscribe
+=head2 C<unsubscribe>
 
-This unsubscribes you to a queue or topic. You must pass in a destination:
+This unsubscribes you to a queue or topic. You must pass in a
+C<destination> or an C<id>:
 
   $stomp->unsubcribe({ destination => '/queue/foo' });
 
-=head2 receive_frame
+=head2 C<receive_frame>
 
-This blocks and returns you the next Stomp frame.
+This blocks and returns you the next Stomp frame, or C<undef> if there
+was a connection problem.
 
   my $frame = $stomp->receive_frame;
   warn $frame->body; # do something here
-
-The header bytes_message is 1 if the message was a BytesMessage.
 
 By default this method will block until a frame can be returned. If you wish to
 wait for a specified time pass a C<timeout> argument:
@@ -644,10 +903,10 @@ wait for a specified time pass a C<timeout> argument:
   # Wait half a second for a frame, else return undef
   $stomp->receive_frame({ timeout => 0.5 })
 
-=head2 can_read
+=head2 C<can_read>
 
-This returns whether there is new data is waiting to be read from the STOMP
-server. Optionally takes a timeout in seconds:
+This returns whether there is new data waiting to be read from the
+STOMP server. Optionally takes a timeout in seconds:
 
   my $can_read = $stomp->can_read;
   my $can_read = $stomp->can_read({ timeout => '0.1' });
@@ -655,14 +914,14 @@ server. Optionally takes a timeout in seconds:
 C<undef> says block until something can be read, C<0> says to poll and return
 immediately.
 
-=head2 ack
+=head2 C<ack>
 
-This acknowledges that you have received and processed a frame (if you
-are using client acknowledgements):
+This acknowledges that you have received and processed a frame I<and
+all frames before it> (if you are using client acknowledgements):
 
   $stomp->ack( { frame => $frame } );
 
-=head2 send_frame
+=head2 C<send_frame>
 
 If this module does not provide enough help for sending frames, you
 may construct your own frame and send it:
@@ -672,9 +931,19 @@ may construct your own frame and send it:
        { command => $command, headers => $conf, body => $body } );
   $self->send_frame($frame);
 
+This is the method used by all the other methods that send frames. It
+will keep trying to send the frame as hard as it can, reconnecting if
+the connection breaks (limited by L<< /C<reconnect_attempts> >>). If
+no connection can be established, and L<< /C<reconnect_attempts> >> is
+not 0, this method will C<die>.
+
 =head1 SEE ALSO
 
 L<Net::Stomp::Frame>.
+
+=head1 SOURCE REPOSITORY
+
+https://github.com/dakkar/Net-Stomp
 
 =head1 AUTHORS
 
@@ -691,6 +960,7 @@ Vigith Maurice <vigith@yahoo-inc.com>,
 Stephen Fralich <sjf4@uw.edu>,
 Squeeks <squeek@cpan.org>,
 Chisel Wright <chisel@chizography.net>,
+Gianni Ceccarelli <dakkar@thenautilus.net>
 
 =head1 COPYRIGHT
 

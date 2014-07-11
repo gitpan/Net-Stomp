@@ -1,12 +1,15 @@
 package Net::Stomp::Frame;
 use strict;
 use warnings;
+
+our $VERSION='0.47';
+
 use base 'Class::Accessor::Fast';
 __PACKAGE__->mk_accessors(qw(command headers body));
 
 BEGIN {
     for my $header (
-        qw(destination exchange content-type content-length message-id))
+        qw(destination exchange content-type content-length message-id reply-to))
     {
         my $method = $header;
         $method =~ s/-/_/g;
@@ -17,6 +20,13 @@ BEGIN {
             $self->headers->{$header};
         };
     }
+}
+
+sub new {
+    my $class = shift;
+    my $self  = $class->SUPER::new(@_);
+    $self->headers({}) unless defined $self->headers;
+    return $self;
 }
 
 sub as_string {
@@ -39,7 +49,48 @@ sub as_string {
     }
     $frame .= "\n";
     $frame .= $body || '';
-    $frame .= "\000";
+    $frame .= "\0";
+}
+
+sub parse {
+    my ($class,$string) = @_;
+
+    $string =~ s{
+      \A\s*
+      ([A-Z]+)\n #command
+      ((?:[^\n]+\n)*)\n # header block
+    }{}smx;
+    my ($command,$headers_block) = ($1,$2);
+
+    return unless $command;
+
+    my ($headers,$body);
+    if ($headers_block) {
+        foreach my $line (split(/\n/, $headers_block)) {
+            my ($key, $value) = split(/\s*:\s*/, $line, 2);
+            $headers->{$key} = $value;
+        }
+    }
+
+    if ($headers && $headers->{'content-length'}) {
+        if (length($string) >= $headers->{'content-length'}) {
+            $body = substr($string,
+                           0,
+                           $headers->{'content-length'},
+                           '' );
+        }
+        else { return } # not enough body
+    } elsif ($string =~ s/\A(.*?)\0//s) {
+        # No content-length header.
+        $body = $1 if length($1);
+    }
+    else { return } # no body
+
+    return $class->new({
+        command => $command,
+        headers => $headers,
+        body => $body,
+    });
 }
 
 1;
@@ -60,20 +111,14 @@ Net::Stomp::Frame - A STOMP Frame
   } );
   my $frame  = Net::Stomp::Frame->parse($string);
   my $string = $frame->as_string;
-  
+
 =head1 DESCRIPTION
 
-This module encapulates a Stomp frame. Stomp is the Streaming Text
-Orientated Messaging Protocol (or the Protocol Briefly Known as TTMP
-and Represented by the symbol :ttmp). It's a simple and easy to
-implement protocol for working with Message Orientated Middleware from
-any language. L<Net::Stomp> is useful for talking to Apache
-ActiveMQ, an open source (Apache 2.0 licensed) Java Message Service
-1.1 (JMS) message broker packed with many enterprise features.
+This module encapulates a Stomp frame.
 
 A Stomp frame consists of a command, a series of headers and a body.
 
-For details on the protocol see L<http://stomp.codehaus.org/Protocol>.
+For details on the protocol see L<https://stomp.github.io/>.
 
 =head1 METHODS
 
@@ -99,6 +144,19 @@ Create a string containing the serialised frame representing the frame:
 
   my $string = $frame->as_string;
 
+=head2 command
+
+Get or set the frame command.
+
+=head2 body
+
+Get or set the frame body.
+
+=head2 headers
+
+Get or set the frame headers, as a hashref. All following methods are
+just shortcuts into this hashref.
+
 =head2 destination
 
 Get or set the C<destination> header.
@@ -119,6 +177,10 @@ Get or set the C<exchange> header.
 
 Get or set the C<message-id> header.
 
+=head2 reply_to
+
+Get or set the C<reply-to> header.
+
 =head1 SEE ALSO
 
 L<Net::Stomp>.
@@ -126,6 +188,10 @@ L<Net::Stomp>.
 =head1 AUTHOR
 
 Leon Brocard <acme@astray.com>.
+
+=head1 CONTRIBUTORS
+
+Gianni Ceccarelli <dakkar@thenautilus.net>
 
 =head1 COPYRIGHT
 
