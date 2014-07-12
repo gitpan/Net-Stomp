@@ -35,6 +35,7 @@
       },
       "test" : {
          "requires" : {
+            "Test::Deep" : "0",
             "Test::Fatal" : "0",
             "Test::More" : "0"
          }
@@ -43,15 +44,15 @@
    "provides" : {
       "Net::Stomp" : {
          "file" : "lib/Net/Stomp.pm",
-         "version" : "0.47"
+         "version" : "0.48"
       },
       "Net::Stomp::Frame" : {
          "file" : "lib/Net/Stomp/Frame.pm",
-         "version" : "0.47"
+         "version" : "0.48"
       },
       "Net::Stomp::StupidLogger" : {
          "file" : "lib/Net/Stomp/StupidLogger.pm",
-         "version" : "0.47"
+         "version" : "0.48"
       }
    },
    "release_status" : "stable",
@@ -60,5 +61,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.47"
+   "version" : "0.48"
 }
