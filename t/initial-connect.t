@@ -20,7 +20,7 @@ subtest 'simplest case' => sub {
         methods(
             hostname => 'localhost',
             port => 61613,
-            _cur_host => 0,
+            current_host => 0,
             socket => \*STDIN,
             select => noclass(superhashof({socket=>\*STDIN})),
         ),
@@ -36,7 +36,7 @@ subtest 'simplest case, old style' => sub {
         methods(
             hostname => 'localhost',
             port => 61613,
-            _cur_host => undef,
+            current_host => undef,
             socket => \*STDIN,
             select => noclass(superhashof({socket=>\*STDIN})),
         ),
@@ -46,13 +46,14 @@ subtest 'simplest case, old style' => sub {
 
 subtest 'two host, first one' => sub {
     local @sockets=(\*STDIN);
-    my $s = mkstomp(hosts=>[{hostname=>'one',port=>1234},{hostname=>'two',port=>3456}]);
+    my $s = mkstomp(hosts=>[{hostname=>'one',port=>1234},{hostname=>'two',port=>3456,ssl=>1}]);
     cmp_deeply(
         $s,
         methods(
             hostname => 'one',
             port => 1234,
-            _cur_host => 0,
+            ssl => bool(0),
+            current_host => 0,
             socket => \*STDIN,
         ),
         'correct',
@@ -61,13 +62,32 @@ subtest 'two host, first one' => sub {
 
 subtest 'two host, second one' => sub {
     local @sockets=(undef,\*STDIN);
-    my $s = mkstomp(hosts=>[{hostname=>'one',port=>1234},{hostname=>'two',port=>3456}]);
+    my $s = mkstomp(hosts=>[{hostname=>'one',port=>1234},{hostname=>'two',port=>3456,ssl=>1,ssl_options=>{a=>'b'}}]);
     cmp_deeply(
         $s,
         methods(
             hostname => 'two',
             port => 3456,
-            _cur_host => 1,
+            ssl => 1,
+            ssl_options => {a=>'b'},
+            current_host => 1,
+            socket => \*STDIN,
+        ),
+        'correct',
+    );
+};
+
+subtest 'two host, second one, SSL on first' => sub {
+    local @sockets=(undef,\*STDIN);
+    my $s = mkstomp(hosts=>[{hostname=>'one',port=>1234,ssl=>1,ssl_options=>{a=>'b'}},{hostname=>'two',port=>3456}]);
+    cmp_deeply(
+        $s,
+        methods(
+            hostname => 'two',
+            port => 3456,
+            ssl => bool(0),,
+            ssl_options => {},
+            current_host => 1,
             socket => \*STDIN,
         ),
         'correct',

@@ -6,10 +6,10 @@ use Net::Stomp::Frame;
 use Carp qw(longmess);
 use base 'Class::Accessor::Fast';
 use Net::Stomp::StupidLogger;
-our $VERSION = '0.48';
+our $VERSION = '0.49';
 
 __PACKAGE__->mk_accessors( qw(
-    _cur_host failover hostname hosts port select serial session_id socket ssl
+    current_host failover hostname hosts port select serial session_id socket ssl
     ssl_options subscriptions _connect_headers bufsize
     reconnect_on_fork logger connect_delay
     reconnect_attempts initial_reconnect_attempts
@@ -110,13 +110,16 @@ my $socket_class;
 sub _get_connection {
     my $self = shift;
     if (my $hosts = $self->hosts) {
-        if (defined $self->_cur_host && ($self->_cur_host < $#{$hosts} ) ) {
-            $self->_cur_host($self->_cur_host+1);
+        if (defined $self->current_host && ($self->current_host < $#{$hosts} ) ) {
+            $self->current_host($self->current_host+1);
         } else {
-            $self->_cur_host(0);
+            $self->current_host(0);
         }
-        $self->hostname($hosts->[$self->_cur_host]->{hostname});
-        $self->port($hosts->[$self->_cur_host]->{port});
+        my $h = $hosts->[$self->current_host];
+        $self->hostname($h->{hostname});
+        $self->port($h->{port});
+        $self->ssl($h->{ssl});
+        $self->ssl_options($h->{ssl_options} || {});
     }
     my $socket = $self->_get_socket;
     $self->_logdie("Error connecting to " . $self->hostname . ':' . $self->port . ": $!")
@@ -649,6 +652,20 @@ port here. If you modify this value during the lifetime of the
 object, the new value will be used for the subsequent reconnect
 attempts.
 
+=head2 C<ssl>
+
+Boolean, defaults to false, whether we should use SSL to talk to the
+single broker. If you modify this value during the lifetime of the
+object, the new value will be used for the subsequent reconnect
+attempts.
+
+=head2 C<ssl_options>
+
+Options to pass to L<< /C<IO::Socket::SSL> >> when connecting via SSL
+to the single broker. If you modify this value during the lifetime of
+the object, the new value will be used for the subsequent reconnect
+attempts.
+
 =head2 C<failover>
 
 Modifying this attribute after the object has been constructed has no
@@ -664,20 +681,15 @@ This is equivalent to setting L<< /C<hosts> >> to:
 
 =head2 C<hosts>
 
-Arrayref of hashrefs, each having a C<hostname> key and a C<port>
-key. Connections will be attempted in order, looping around if
-necessary, depending on the values of L<<
+Arrayref of hashrefs, each having a C<hostname> key and a C<port> key,
+and optionall C<ssl> and C<ssl_options>. Connections will be attempted
+in order, looping around if necessary, depending on the values of L<<
 /C<initial_reconnect_attempts> >> and L<< /C<reconnect_attempts> >>.
 
-=head2 C<ssl>
+=head2 C<current_host>
 
-Boolean, defaults to false, whether we should use SSL to talk to the
-brokers. Yes, this is global to all the L<< /C<hosts> >>, although it
-really should be per-host.
-
-=head2 C<ssl_options>
-
-Options to pass to L<< /C<IO::Socket::SSL> >> when connecting via SSL.
+If using multiple hosts, this is the index (inside the L<< /C<hosts>
+>> array) of the one we're currently connected to.
 
 =head2 C<logger>
 
